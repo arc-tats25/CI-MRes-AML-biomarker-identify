@@ -1,0 +1,546 @@
+---
+title: "CI Project - AML biomarker test"
+output: html_document
+author: "Arran Tattersall"
+---
+
+set directory
+```{r setup, include=FALSE, }
+setwd("/rds/general/user/at5023/home/CancerInformatics/Assignment/AML")
+getwd()
+```
+
+import TCGA data to directory via bash
+```{bash}
+#data
+wget https://gdc-hub.s3.us-east-1.amazonaws.com/download/TCGA-LAML.gistic.tsv.gz ##copy number variation by gene (GISTIC)
+wget https://gdc-hub.s3.us-east-1.amazonaws.com/download/TCGA-LAML.methylation450.tsv.gz ## methylation (450) data
+wget https://gdc-hub.s3.us-east-1.amazonaws.com/download/TCGA-LAML.mutect2_snv.tsv.gz ## single nucleotide variation data
+wget https://gdc-hub.s3.us-east-1.amazonaws.com/download/TCGA-LAML.htseq_fpkm-uq.tsv.gz ## RNAseq data
+wget https://gdc-hub.s3.us-east-1.amazonaws.com/download/TCGA-LAML.GDC_phenotype.tsv.gz ## clinical data
+wget https://gdc-hub.s3.us-east-1.amazonaws.com/download/TCGA-LAML.survival.tsv ## survival data
+
+#mapping
+wget https://gdc-hub.s3.us-east-1.amazonaws.com/download/illuminaMethyl450_hg38_GDC ## Human methylation data TCGA suggested
+
+
+gunzip *.gz ## unzip
+```
+
+load required packages 
+```{r}
+library(survival)
+```
+
+import data as R readable
+```{r}
+cnv.data.1 <-
+  read.table(
+    "TCGA-LAML.gistic.tsv",
+    sep = "\t",
+    header = TRUE,
+    row.names = 1
+  ) ## cnv data by gene
+
+meth.data <-
+  read.table(
+    "TCGA-LAML.methylation450.tsv",
+    sep = "\t",
+    header = TRUE,
+    row.names = 1
+  ) ## methylation data
+
+snv.data <- 
+  read.table(
+    "TCGA-LAML.mutect2_snv.tsv", 
+    sep = "\t", 
+    header = TRUE,
+    row.names = NULL
+  ) ## snv data
+
+rna.data <-
+  read.table(
+    "TCGA-LAML.htseq_fpkm-uq.tsv",
+    sep = "\t",
+    header = TRUE,
+    row.names = 1
+  )
+rna.data <- as.matrix(rna.data) ## RNAseq data
+
+clin.data <-
+  read.table(
+    "TCGA-LAML.GDC_phenotype.tsv",
+    sep = "\t",
+    header = TRUE,
+    row.names = 1
+  )
+clin.data$leukemia_french_american_british_morphology_code[clin.data$leukemia_french_american_british_morphology_code == "M0 Undifferentiated"] <- "M0"
+rownames(clin.data) <-
+  gsub(rownames(clin.data), pattern = "-", replace = ".") ## clinical data
+
+
+surv.data <- 
+  read.table(
+    "TCGA-LAML.survival.tsv",
+    sep = "\t",
+    header = TRUE,
+    row.names = 1
+  )
+rownames(surv.data) <-
+  gsub(rownames(surv.data), pattern = "-", replace = ".") ## survival data
+```
+
+with survival package find associations with patient outcomes
+```{r}
+os.time <- surv.data[colnames(rna.data), "OS.time"] ## length of time before outcome 
+
+os.event <- as.numeric(surv.data[colnames(rna.data), "OS"]) ## patient outcome 
+
+cesc.os <- Surv(os.time, os.event)
+```
+
+find genes most significantly associated to patient outcome by a univariate model
+```{r}
+results.univariate <- array(NA, c(nrow(rna.data), 4))
+
+colnames(results.univariate) <- c("HR", 
+                                  "LCI", 
+                                  "UCI", 
+                                  "PVAL")
+
+rownames(results.univariate) <- rownames(rna.data)
+
+results.univariate <- as.data.frame(results.univariate)
+
+
+for (i in 1:nrow(rna.data))
+  
+{
+  coxphmodel <- coxph(cesc.os ~ as.numeric(rna.data[i, ]))
+  
+  results.univariate$HR[i] <- summary(coxphmodel)$coef[1, 2]
+  
+  results.univariate$LCI[i] <- summary(coxphmodel)$conf.int[1, 3]
+  
+  results.univariate$UCI[i] <- summary(coxphmodel)$conf.int[1, 4]
+  
+  results.univariate$PVAL[i] <- summary(coxphmodel)$coef[1, 5]
+}
+
+
+results.univariate <- as.data.frame(results.univariate)
+
+results.univariate$FDR <-
+  p.adjust(results.univariate$PVAL, method = "fdr")
+
+results.univariate <-
+  results.univariate[order(results.univariate$FDR, decreasing = FALSE),]
+
+results.univariate[1:20, ]
+
+# ENSG00000240436.1 
+
+```
+
+find clinical details most significantly associated to patient outcome by a multivariate model
+```{r}
+clin.data <- clin.data[colnames(rna.data), ] ## removing patients from clin.data which are not present in rna.data
+
+age <- as.numeric(clin.data$age_at_initial_pathologic_diagnosis) ## age
+
+treatment.history <- as.factor(clin.data$history_of_neoadjuvant_treatment) ## previous treatment
+
+lymphocyte.count <- as.numeric(clin.data$lab_procedure_abnormal_lymphocyte_result_percent_value) ## abnormal lymphocyte count
+
+blast.count <- as.numeric(clin.data$lab_procedure_blast_cell_outcome_percentage_value) ## blast count
+
+bm.band <- as.numeric(clin.data$lab_procedure_bone_marrow_band_cell_result_percent_value) ## marrow band
+
+bm.basophil <- as.numeric(clin.data$lab_procedure_bone_marrow_basophil_result_percent_value) ## bone marrow basophil count
+
+bm.blast <- as.numeric(clin.data$lab_procedure_bone_marrow_blast_cell_outcome_percent_value) ## bone marrow blast count
+
+cellularity <- as.numeric(clin.data$lab_procedure_bone_marrow_cellularity_outcome_percent_value) ## % bone marrow cellularity
+
+bm.eosinophil <- as.numeric(clin.data$lab_procedure_bone_marrow_lab_eosinophil_result_percent_value) ## marrow band
+
+bm.lymphocyte <- as.numeric(clin.data$lab_procedure_bone_marrow_lymphocyte_outcome_percent_value) ## bone marrow lympocyte count
+
+bm.neutrophil <- as.numeric(clin.data$lab_procedure_bone_marrow_neutrophil_result_percent_value) ## bone marrow neutrophil count
+
+diff <-  as.factor(clin.data$leukemia_french_american_british_morphology_code) ## FAB morphology
+
+m0 <- grep("M0", diff)
+m1 <- grep("M1", diff)
+m2 <- grep("M2", diff)
+m3 <- grep("M3", diff)
+m4 <- grep("M4", diff)
+m5 <- grep("M5", diff)
+m6 <- grep("M6", diff)
+m7 <- grep("M7", diff)
+
+diff.high <- rep(0, nrow(clin.data))
+diff.high[c(m2, m3, m4, m5, m6, m7)] <- 1 ## high maturation FAB classification
+
+diff.low <- rep(0, nrow(clin.data))
+diff.low[c(m0, m1)] <- 1 # low maturation FAB classification
+
+diff.t3 <- rep(0, nrow(clin.data))
+diff.t3[c(m5, m6, m7)] <- 1 ## after seeing coef values from diff summary, made new variable including 3 highest coef values
+
+summary(coxph(cesc.os ~ age))$coef
+summary(coxph(cesc.os ~ treatment.history))$coef
+summary(coxph(cesc.os ~ lymphocyte.count))$coef
+summary(coxph(cesc.os ~ blast.count))$coef
+summary(coxph(cesc.os ~ bm.band))$coef
+summary(coxph(cesc.os ~ bm.basophil))$coef
+summary(coxph(cesc.os ~ bm.blast))$coef
+summary(coxph(cesc.os ~ cellularity))$coef
+summary(coxph(cesc.os ~ bm.eosinophil))$coef
+summary(coxph(cesc.os ~ bm.lymphocyte))$coef
+summary(coxph(cesc.os ~ bm.neutrophil))$coef
+summary(coxph(cesc.os ~ diff))$coef
+summary(coxph(cesc.os ~ diff.high))$coef
+summary(coxph(cesc.os ~ diff.low))$coef
+summary(coxph(cesc.os ~ diff.t3))$coef
+
+
+## NB diff.high and diff.low have *-1 coef and same p-value, suprised at low blast influence
+```
+
+low.diff prognosis calculation
+```{r}
+
+results.multivariate.1 <- array(NA, c(nrow(rna.data), 4))
+
+colnames(results.multivariate.1) <- c("HR", "LCI", "UCI", "PVAL")
+rownames(results.multivariate.1) <- rownames(rna.data)
+
+results.multivariate.1 <- as.data.frame(results.multivariate.1) 
+
+for (i in 1:nrow(rna.data))
+  
+{
+  coxphmodel <- coxph(cesc.os ~ rna.data[i, ] + diff.low)
+  
+  results.multivariate.1$HR[i] <- summary(coxphmodel)$coef[1, 2]
+  
+  results.multivariate.1$LCI[i] <- summary(coxphmodel)$conf.int[1, 3]
+  
+  results.multivariate.1$UCI[i] <- summary(coxphmodel)$conf.int[1, 4]
+  
+  results.multivariate.1$PVAL[i] <- summary(coxphmodel)$coef[1, 5]
+}
+
+
+results.multivariate.1 <- as.data.frame(results.multivariate.1)
+
+results.multivariate.1$FDR <-
+  p.adjust(results.multivariate.1$PVAL, method = "fdr")
+
+
+results.multivariate.1 <-
+  results.multivariate.1[order(results.multivariate.1$FDR, decreasing = FALSE), ]
+
+results.multivariate.1[1:20, ] ## ENSG00000240436.1	HR 0.7397948	LCI0.6720393	HCI0.8143815	FDR4.472962e-05 RP11
+```
+
+high.diff prognosis calculation
+```{r}
+
+results.multivariate.2 <- array(NA, c(nrow(rna.data), 4))
+
+colnames(results.multivariate.2) <- c("HR", "LCI", "UCI", "PVAL")
+rownames(results.multivariate.2) <- rownames(rna.data)
+
+results.multivariate.2 <- as.data.frame(results.multivariate.2) 
+
+for (i in 1:nrow(rna.data))
+  
+{
+  coxphmodel <- coxph(cesc.os ~ rna.data[i, ] + diff.high)
+  
+  results.multivariate.2$HR[i] <- summary(coxphmodel)$coef[1, 2]
+  
+  results.multivariate.2$LCI[i] <- summary(coxphmodel)$conf.int[1, 3]
+  
+  results.multivariate.2$UCI[i] <- summary(coxphmodel)$conf.int[1, 4]
+  
+  results.multivariate.2$PVAL[i] <- summary(coxphmodel)$coef[1, 5]
+}
+
+
+results.multivariate.2 <- as.data.frame(results.multivariate.2)
+
+results.multivariate.2$FDR <-
+  p.adjust(results.multivariate.2$PVAL, method = "fdr")
+
+
+results.multivariate.2 <-
+  results.multivariate.2[order(results.multivariate.2$FDR, decreasing = FALSE), ]
+
+results.multivariate.2[1:20, ] ## same results as low.diff
+```
+
+FAB classes with highest coef prognosis calculation (m7 only has 1 sample, m6 only 2)
+```{r}
+
+results.multivariate.3 <- array(NA, c(nrow(rna.data), 4))
+
+colnames(results.multivariate.3) <- c("HR", "LCI", "UCI", "PVAL")
+rownames(results.multivariate.3) <- rownames(rna.data)
+
+results.multivariate.3 <- as.data.frame(results.multivariate.3) 
+
+for (i in 1:nrow(rna.data))
+  
+{
+  coxphmodel <- coxph(cesc.os ~ rna.data[i, ] + diff.t3)
+  
+  results.multivariate.3$HR[i] <- summary(coxphmodel)$coef[1, 2]
+  
+  results.multivariate.3$LCI[i] <- summary(coxphmodel)$conf.int[1, 3]
+  
+  results.multivariate.3$UCI[i] <- summary(coxphmodel)$conf.int[1, 4]
+  
+  results.multivariate.3$PVAL[i] <- summary(coxphmodel)$coef[1, 5]
+}
+
+
+results.multivariate.3 <- as.data.frame(results.multivariate.3)
+
+results.multivariate.3$FDR <-
+  p.adjust(results.multivariate.3$PVAL, method = "fdr")
+
+
+results.multivariate.3 <-
+  results.multivariate.3[order(results.multivariate.3$FDR, decreasing = FALSE), ]
+
+results.multivariate.3[1:20, ]
+```
+
+All point to ENSG00000240436.1, RP11-95I19.1 ( in GRCH38 it is RPL35AP14)
+RPL35AP14 does not have any associated methylation, copy number variations or single nucleotide variations in the data,
+and RPL35 (ENSG00000136942) is a known biomarker DOI: 10.3389/fendo.2023.1161269 
+
+
+all diff calculation
+```{r}
+results.multivariate.x <- array(NA, c(nrow(rna.data), 4))
+
+colnames(results.multivariate.x) <- c("HR", "LCI", "UCI", "PVAL")
+rownames(results.multivariate.x) <- rownames(rna.data)
+
+results.multivariate.x <- as.data.frame(results.multivariate.x) 
+
+for (i in 1:nrow(rna.data))
+  
+{
+  coxphmodel <- coxph(cesc.os ~ rna.data[i, ] + diff)
+  
+  results.multivariate.x$HR[i] <- summary(coxphmodel)$coef[1, 2]
+  
+  results.multivariate.x$LCI[i] <- summary(coxphmodel)$conf.int[1, 3]
+  
+  results.multivariate.x$UCI[i] <- summary(coxphmodel)$conf.int[1, 4]
+  
+  results.multivariate.x$PVAL[i] <- summary(coxphmodel)$coef[1, 5]
+}
+
+
+results.multivariate.x <- as.data.frame(results.multivariate.x)
+
+results.multivariate.x$FDR <-
+  p.adjust(results.multivariate.x$PVAL, method = "fdr")
+
+
+results.multivariate.x <-
+  results.multivariate.x[order(results.multivariate.x$FDR, decreasing = FALSE), ]
+
+results.multivariate.x[1:20, ]
+
+```
+
+stratify patients by each expression
+```{r}
+summary(rna.data["ENSG00000107175.9", ])
+
+creb.high <-
+  as.numeric(rna.data["ENSG00000107175.9", ] > median(rna.data["ENSG00000107175.9", ]))
+
+## found info CREB3 https://www.genecards.org/cgi-bin/carddisp.pl?gene=CREB3
+```
+
+plotting Kaplan–Meier graph
+```{r}
+png(
+  "CESC_OS_byCREB3.png",
+  width = 6,
+  height = 6,
+  units = 'in',
+  res = 300
+)
+plot(
+  survfit(cesc.os ~ creb.high),
+  col = c("black", "red"),
+  lwd = 2,
+  mark.time = TRUE,
+  xlab = "Overall Survival time (days)",
+  ylab = "Proportion Surviving",
+  main = "CREB3 in CESC"
+)
+legend(
+  "topright",
+  legend = c("CREB3-high", "CREB3-low"),
+  col = c("red", "black"),
+  lwd = 2
+)
+dev.off()
+```
+
+testing reasons for expression difference: methylation, copy number variation, single nucleotide variation
+selecting methylation markers
+```{r}
+## ENSG00000107175.9 CREB3
+meth.annot.1 <-
+  read.csv("illuminaMethyl450_hg38_GDC",
+    sep = "\t",
+    header = TRUE,
+    row.names = 1) ## convert file to R readable
+
+meth.creb <-
+  rownames(meth.annot.1[which(meth.annot.1$chrom == "chr9" & meth.annot.1$gene == "CREB3,MIR6853,TLN1"), ]) ## multiple genes on site, 7  sites found
+```
+
+generating new data sets using only sample data found in meth.data file
+```{r}
+rna.data2 <-
+  rna.data[, which(is.element(colnames(rna.data), colnames(meth.data)))]
+rna.data2 <- as.matrix(rna.data2[, order(colnames(rna.data2))])
+
+meth.data2 <-
+  meth.data[, which(is.element(colnames(meth.data), colnames(rna.data2)))]
+meth.data2 <- as.matrix(meth.data2[, order(colnames(meth.data2))])
+
+meth.data.creb <- meth.data2[meth.creb, ]
+
+surv.data2 <-
+  surv.data[which(is.element(rownames(surv.data), colnames(rna.data2))), ]
+surv.data2 <- as.data.frame(surv.data2[colnames(surv.data2), ])
+```
+
+methylation correlation test
+```{r}
+creb.high2 <-
+  as.numeric(as.numeric(rna.data2["ENSG00000107175.9", ]) > median(as.numeric(rna.data2["ENSG00000107175.9", ])))
+
+results.meth <- array(NA, c(nrow(meth.data.creb), 4))
+rownames(results.meth) <- rownames(meth.data.creb)
+colnames(results.meth) <-
+  c("Cor.CREB3",
+    "Cor.test.CREB3",
+    "Mean.high.CREB3",
+    "Mean.low.CREB3")
+
+for (i in 1:nrow(meth.data.creb))
+{
+  results.meth[i, 1] <-
+    cor.test(as.numeric(rna.data2["ENSG00000107175.9", ]), as.numeric(meth.data.creb[i, ]), use ="c")$est
+  results.meth[i, 2] <-
+    cor.test(as.numeric(rna.data2["ENSG00000107175.9", ]), as.numeric(meth.data.creb[i, ]), use ="c")$p.value
+}
+
+results.meth[, 3] <-
+  apply(meth.data.creb[, which(creb.high2 == 1)], 1, mean, na.rm = TRUE)
+
+results.meth[, 4] <-
+  apply(meth.data.creb[, which(creb.high2 == 0)], 1, mean, na.rm = TRUE)
+
+summary(results.meth)
+```
+
+plotting methylation results
+```{r}
+png(
+  "CESC_CREB3_ExpVsMeth_overlay.png",
+  width = 6,
+  height = 6,
+  units = 'in',
+  res = 300
+)
+
+plot(
+  as.numeric(meth.data.creb["cg00833393", ]), ## longest y-axis for blank plot
+  as.numeric(rna.data2["ENSG00000107175.9", ]),
+  xlab = "DNA Methylation",
+  ylab = "CREB3 RNAseq",
+  main = "CESC_CREB3_ExpVsMeth",
+  pch = 16
+)
+
+site_colors <- c()
+
+for (site in c(
+  "cg00833393",
+  "cg00910297",
+  "cg05219900",
+  "cg12763402",
+  "cg13694973",
+  "cg14123850",
+  "cg14307667"
+)) ## combined plots
+{
+  color <- palette()[length(site_colors) + 1] ## unique differentiated colors for each site
+  
+  points(
+    as.numeric(meth.data.creb[site, ]),
+    as.numeric(rna.data2["ENSG00000107175.9", ]),
+    col = color,
+    pch = 16
+  )
+
+  abline(lm((as.numeric(rna.data2["ENSG00000107175.9", ])) ~ as.numeric(meth.data.creb[site, ])), 
+  col = color, 
+  lty = 2)
+
+  site_colors <- c(site_colors, color)
+}
+
+legend(
+  "bottomright",
+  legend = c(
+    "cg00833393",
+    "cg00910297",
+    "cg05219900",
+    "cg12763402",
+    "cg13694973",
+    "cg14123850",
+    "cg14307667"
+  ),
+  col = site_colors,
+  pch = 16,
+  bty = "n",
+  title = "DNA Methylation Site"
+)
+
+dev.off()
+## figure appears to corroborate a lack of correlation between expression and methylation
+```
+
+selecting for copy number variations
+```{r}
+creb.cnv <- cnv.data.1["ENSG00000107175.9", ]
+
+summary(creb.cnv)
+range(creb.cnv) ## no copy number variations present
+```
+
+selecting single nucleotide variation
+```{r}
+creb.snv <- snv.data["ENSG00000107175.9", ]
+
+summary(creb.snv)## empty, no SNV data found
+``` 
+
+genecards lists 23 enhancers/promoters for CREB3. Altered expression or activation of these enhancers/promoters could explain the downstream changes in levels of CREB3 expression. Also would explain why methylation seems to have no correlation and why no copy number variation, or single nucleotide variation influences were found
+
